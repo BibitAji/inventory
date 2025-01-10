@@ -7,4 +7,4 @@ st-gsheets-connection
 google
 gspread
 yfinance
-tensorflow
+tensorflow-cpu==2.18
