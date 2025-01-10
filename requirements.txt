@@ -6,3 +6,5 @@ scikit-learn
 st-gsheets-connection
 google
 gspread
+yfinance
+tensorflow
