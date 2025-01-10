@@ -1,115 +1,103 @@
 import streamlit as st
-import gspread
-from google.oauth2.service_account import Credentials
+import yfinance as yf
 import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
+from datetime import datetime, timedelta
 
-# Path to your credentials file
-credentials_file = "entry-form-423700-59d9ca132408.json"
+# 1. Konfigurasi Streamlit
+st.title("Real-Time Stock Prediction with LSTM")
+st.write("Masukkan simbol saham dan klik 'Prediksi'.")
 
-# Define the scope
-scope = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/spreadsheets",
-         "https://www.googleapis.com/auth/drive.file",
-         "https://www.googleapis.com/auth/drive"]
+# Input pengguna
+symbol = st.text_input("Masukkan simbol saham (contoh: AAPL, TSLA):", value="AAPL")
+predict_days = st.slider("Berapa hari prediksi ke depan?", min_value=1, max_value=30, value=7)
 
-# Authenticate using the credentials file
-creds = Credentials.from_service_account_file(credentials_file, scopes=scope)
-client = gspread.authorize(creds)
+# Tombol prediksi
+if st.button("Prediksi"):
+    st.write(f"Menampilkan prediksi untuk {symbol} selama {predict_days} hari ke depan.")
+    
+    # 2. Ambil data dari yfinance
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365*2)  # Data 2 tahun terakhir
+    st.write("Mengunduh data saham...")
+    data = yf.download(symbol, start=start_date, end=end_date)
 
-# Open the Google Sheet using the URL provided
-sheet_url = "https://docs.google.com/spreadsheets/d/1cwZZ-TbqnpLAHLRaDIoAGSzZa5aPKn4u9Ni91sj9IAY/edit?usp=sharing"
-sheet = client.open_by_url(sheet_url)
-worksheet = sheet.get_worksheet(0)
+    if data.empty:
+        st.error("Tidak ada data untuk simbol saham ini. Coba simbol lain.")
+    else:
+        st.write(f"Data berhasil diunduh. {len(data)} data poin ditemukan.")
+        st.line_chart(data['Close'], width=700, height=300)
 
-def add_row(data):
-    worksheet.append_row(data)
-    return f"Row with data '{data}' has been added."
+        # 3. Persiapan Data
+        st.write("Memproses data...")
+        close_prices = data['Close'].values.reshape(-1, 1)
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(close_prices)
 
-def delete_row_by_part_number(part_number):
-    records = worksheet.get_all_records()
-    for idx, record in enumerate(records, start=2):  # start=2 to account for the header row
-        if record.get("Part Number") == part_number:
-            worksheet.delete_rows(idx)
-            return f"Row with Part Number '{part_number}' has been deleted."
-    return f"No record found with the Part Number '{part_number}'."
+        # Data training
+        train_size = int(len(scaled_data) * 0.8)
+        train_data = scaled_data[:train_size]
+        test_data = scaled_data[train_size:]
 
-def update_component(part_number, new_component):
-    records = worksheet.get_all_records()
-    for idx, record in enumerate(records, start=2):  # start=2 to account for the header row
-        if record.get("Part Number") == part_number:
-            worksheet.update_cell(idx, 2, new_component)  # Assuming "Component" is the second column
-            return f"Component for Part Number '{part_number}' has been updated to '{new_component}'."
-    return f"No record found with the Part Number '{part_number}'."
+        # Membuat dataset LSTM
+        def create_dataset(dataset, look_back=60):
+            X, y = [], []
+            for i in range(len(dataset) - look_back):
+                X.append(dataset[i:i + look_back, 0])
+                y.append(dataset[i + look_back, 0])
+            return np.array(X), np.array(y)
 
-def main():
-    st.title("Google Sheets Data Management | Bibit Waluyo Aji")
+        look_back = 60
+        X_train, y_train = create_dataset(train_data, look_back)
+        X_test, y_test = create_dataset(test_data, look_back)
 
-    # Read Google Sheets and display DataFrame
-    tabel_csv = sheet_url.replace('/edit?usp=sharing','/gviz/tq?tqx=out:csv' )
-    tabel_df = pd.read_csv(tabel_csv)
-    st.write(tabel_df)
+        # Ubah dimensi agar sesuai dengan input LSTM
+        X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
+        X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], 1)
 
-    # Search bar
-    search = st.text_input("Search in Data")
-    if search:
-        df1 = tabel_df[tabel_df.apply(lambda row: row.astype(str).str.contains(search, case=False).any(), axis=1)]
-        st.write(df1)  
+        # 4. Bangun dan Latih Model LSTM
+        st.write("Melatih model LSTM...")
+        model = Sequential([
+            LSTM(50, return_sequences=True, input_shape=(look_back, 1)),
+            LSTM(50, return_sequences=False),
+            Dense(25),
+            Dense(1)
+        ])
+        model.compile(optimizer='adam', loss='mean_squared_error')
+        model.fit(X_train, y_train, batch_size=64, epochs=10, verbose=0)
 
-    # Data Entry Form
-    st.header("Add Data to Sheet")
-    with st.form(key='add_data_form'):
-        part_number = st.text_input('Part Number')
-        component = st.text_input('Component')
-        quantity = st.text_input('Quantity')
-        annual_demand = st.text_input('Annual Demand')
-        std_deviation = st.text_input('Std. Deviation')
-        lead_time = st.text_input('Lead Time')
-        unit_cost = st.text_input('Unit Cost')
-        ordering_cost = st.text_input('Ordering Cost')
-        storage_cost = st.text_input('Storage Cost')
-        shortage_cost = st.text_input('Shortage Cost')
-        add_button = st.form_submit_button(label='Add')
+        # 5. Prediksi
+        st.write("Melakukan prediksi...")
+        predictions = model.predict(X_test)
+        predictions = scaler.inverse_transform(predictions)
 
-    if add_button:
-        new_row = [
-            part_number, component, quantity, annual_demand, std_deviation,
-            lead_time, unit_cost, ordering_cost, storage_cost, shortage_cost
-        ]
-        result = add_row(new_row)
-        st.write(result)
+        # Visualisasi hasil
+        st.write("Visualisasi prediksi...")
+        train_data_plot = scaler.inverse_transform(train_data)
+        valid_data_plot = scaler.inverse_transform(test_data[look_back:])
+        pred_data_plot = predictions
 
-    # Data Deletion Form
-    st.header("Delete Data from Sheet")
-    with st.form(key='delete_data_form'):
-        part_number_to_delete = st.text_input('Part Number to Delete')
-        delete_button = st.form_submit_button(label='Delete')
+        valid = data.iloc[train_size + look_back:]
+        valid['Predictions'] = pred_data_plot
 
-    if delete_button:
-        if not part_number_to_delete:
-            st.error("Please provide a Part Number to delete.")
-        else:
-            result = delete_row_by_part_number(part_number_to_delete)
-            st.write(result)
-            # Refresh the data
-            tabel_df = pd.read_csv(tabel_csv)
-            st.write(tabel_df)
+        st.line_chart(valid[['Close', 'Predictions']], width=700, height=300)
 
-    # Data Update Form
-    st.header("Update Component in Sheet")
-    with st.form(key='update_data_form'):
-        part_number_to_update = st.text_input('Part Number to Update')
-        new_component = st.text_input('New Component')
-        update_button = st.form_submit_button(label='Update')
+        # Prediksi masa depan
+        st.write("Prediksi data masa depan...")
+        future_data = scaled_data[-look_back:]
+        future_preds = []
+        for _ in range(predict_days):
+            future_input = future_data[-look_back:].reshape(1, look_back, 1)
+            pred = model.predict(future_input)
+            future_preds.append(pred[0, 0])
+            future_data = np.append(future_data, pred[0, 0]).reshape(-1, 1)
 
-    if update_button:
-        if not part_number_to_update or not new_component:
-            st.error("Please provide both a Part Number and a new Component.")
-        else:
-            result = update_component(part_number_to_update, new_component)
-            st.write(result)
-            # Refresh the data
-            tabel_df = pd.read_csv(tabel_csv)
-            st.write(tabel_df)
-
-if __name__ == '__main__':
-    main()
+        future_preds = scaler.inverse_transform(np.array(future_preds).reshape(-1, 1))
+        future_dates = [end_date + timedelta(days=i) for i in range(1, predict_days + 1)]
+        future_df = pd.DataFrame({'Date': future_dates, 'Predicted Close': future_preds.flatten()})
+        st.write(future_df)
+        st.line_chart(future_df.set_index('Date'))
